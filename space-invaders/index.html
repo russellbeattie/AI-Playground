@@ -50,11 +50,11 @@ html,body{
 
 /* ---- top-right icon buttons ---- */
 #tools{
-  position:absolute;top:0;right:0;display:flex;gap:6px;z-index:5;
+  position:absolute;top:0;right:0;display:flex;gap:8px;z-index:5;
   padding:calc(6px + env(safe-area-inset-top)) calc(6px + env(safe-area-inset-right)) 6px 6px;
 }
 .tool{
-  width:38px;height:38px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  width:44px;height:44px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
   background:rgba(0,0,0,.35);border:1px solid rgba(122,226,255,.35);border-radius:9px;
   color:var(--ui);cursor:pointer;padding:0;
   -webkit-appearance:none;appearance:none;
@@ -415,28 +415,26 @@ function buildGraphics(){
   G.bombBoom = makeSprite(SPR.bombBoom, C.white);
 }
 
-/* ---------- text rendering (cached) ---------- */
-var textCache = {}, textCacheN = 0;
-function textCanvas(str,color){
-  var key = color+' '+str;
-  var hit = textCache[key];
+/* ---------- text rendering ----------
+   One canvas per glyph per colour, so the cache is bounded by the alphabet
+   rather than by how many distinct strings the game has ever drawn. */
+var glyphCache = {};
+function glyphCanvas(ch,color){
+  var key = color+ch;
+  var hit = glyphCache[key];
   if (hit) return hit;
-  var chars = String(str).toUpperCase().split('');
-  var w = Math.max(1, chars.length*GLYPH_ADV - 1);
-  var c = makeCanvas(w,GLYPH_H), g = c.getContext('2d');
+  var rows = FONT[ch] || FONT[' '];
+  var c = makeCanvas(GLYPH_W,GLYPH_H), g = c.getContext('2d');
   g.fillStyle = color;
-  for (var i=0;i<chars.length;i++){
-    var rows = FONT[chars[i]] || FONT[' '];
-    var ox = i*GLYPH_ADV;
-    for (var y=0;y<GLYPH_H;y++){
-      var r = rows[y];
-      for (var x=0;x<GLYPH_W;x++) if (r.charAt(x)!=='.') g.fillRect(ox+x,y,1,1);
-    }
+  for (var y=0;y<GLYPH_H;y++){
+    var r = rows[y];
+    for (var x=0;x<GLYPH_W;x++) if (r.charAt(x)!=='.') g.fillRect(x,y,1,1);
   }
-  var res = {cv:c,w:w,h:GLYPH_H};
-  if (textCacheN > 400){ textCache = {}; textCacheN = 0; }
-  textCache[key] = res; textCacheN++;
-  return res;
+  glyphCache[key] = c;
+  return c;
+}
+function textWidth(str,sc){
+  return Math.max(0, String(str).length*GLYPH_ADV - 1) * (sc||1);
 }
 
 /* ---------- audio engine (all sounds synthesised) ---------- */
@@ -730,6 +728,7 @@ function startLevel(){
 function newGame(){
   Game.score = 0; Game.lives = 3; Game.level = 1;
   Game.shotCount = 0; Game.nextExtra = 1500; Game.newHi = false;
+  Game.pendingStart = false;
   resetShields();
   startLevel();
 }
@@ -767,7 +766,7 @@ var CHEAT = { noBombs:false, invincible:false };
 /* ---------- firing ---------- */
 function firePlayer(){
   if (Game.state !== 'play' || !Game.player.alive || Game.bullet) return;
-  Game.bullet = { x: Game.player.x + 6, y: PLAYER_Y - 4, w:1, h:4, vy:-270 };
+  Game.bullet = { x: Game.player.x + 6, y: PLAYER_Y - 4, w:1, h:4, vy:-330 };
   Game.shotCount++;
   Sound.shoot();
 }
@@ -834,7 +833,10 @@ function update(dt){
     return;
   }
   if (Game.state === 'over'){
-    if (Game.timer > 0) Game.timer -= dt;
+    if (Game.timer > 0){
+      Game.timer -= dt;
+      if (Game.timer <= 0 && Game.pendingStart){ Game.pendingStart = false; newGame(); return; }
+    }
     updateBooms(dt);
     return;
   }
@@ -850,9 +852,13 @@ function update(dt){
   /* bomb cadence */
   Game.bombTimer -= dt;
   if (Game.bombTimer <= 0){
+    /* a thinned-out fleet fires less: fewer invaders left, fewer bombs in the
+       air - without this the last few survivors are the hardest part of a wave */
+    var frac = Game.alive / (ROWS*COLS);
     var maxBombs = Math.min(4, 2 + Math.floor((Game.level-1)/3));
+    maxBombs = Math.max(1, Math.min(maxBombs, Math.ceil(Game.alive/8)));
     if (Game.bombs.length < maxBombs && Game.alive > 0) spawnBomb();
-    var base = Math.max(0.42, 1.35 - (Game.level-1)*0.085);
+    var base = Math.max(0.40, 1.70 - (Game.level-1)*0.12) * (1 + 0.9*(1-frac));
     Game.bombTimer = base * (0.55 + Math.random()*0.95);
   }
 
@@ -871,9 +877,14 @@ function updatePlayer(dt){
   var v = 0;
   if (Input.left)  v -= 1;
   if (Input.right) v += 1;
-  if (v !== 0) p.x += v * 92 * dt;
-  if (Input.dragActive) p.x = Input.dragTargetX;
-  p.x = clamp(p.x, 8, VW - 8 - 13);
+  if (v !== 0){
+    /* buttons and keys win over a drag, and the drag follows so it cannot snap back */
+    p.x = clamp(p.x + v * 105 * dt, PLAYER_MIN_X, PLAYER_MAX_X);
+    if (Input.dragActive) Input.reanchor();
+  } else if (Input.dragActive){
+    p.x = Input.dragTargetX;
+  }
+  p.x = clamp(p.x, PLAYER_MIN_X, PLAYER_MAX_X);
   if (Input.fire) firePlayer();
 }
 
@@ -1078,6 +1089,7 @@ var cv = document.getElementById('game');
 var ctx = cv.getContext('2d', { alpha:false });
 var stageEl = document.getElementById('stage');
 var toolsEl = document.getElementById('tools');
+var padEl = document.getElementById('pad');
 var view = { k:1, ox:0, oy:0, cssK:1, cssOx:0, cssOy:0, w:0, h:0 };
 
 function layout(){
@@ -1090,7 +1102,15 @@ function layout(){
   if (cv.width !== cw || cv.height !== ch){ cv.width = cw; cv.height = ch; }
 
   var reserve = Math.min(h*0.25, (toolsEl ? toolsEl.getBoundingClientRect().height : 44) + 4);
-  var k = Math.min(w/VW, (h-reserve)/VH);
+  /* in short landscape the pad floats over the stage - keep the field clear of it */
+  var availW = w;
+  if (padEl && getComputedStyle(padEl).position === 'fixed'){
+    var groups = padEl.querySelectorAll('.padgroup'), gw = 0;
+    for (var gi=0; gi<groups.length; gi++)
+      gw = Math.max(gw, groups[gi].getBoundingClientRect().width);
+    if (gw > 0) availW = Math.max(96, w - 2*(gw + 10));
+  }
+  var k = Math.min(availW/VW, (h-reserve)/VH);
   if (!(k>0)) k = Math.min(w/VW, h/VH);
   k = Math.min(k, 8);
   view.cssK = k;
@@ -1099,6 +1119,12 @@ function layout(){
   view.k = k*dpr;
   view.ox = view.cssOx*dpr;
   view.oy = view.cssOy*dpr;
+  /* Scale drag sensitivity so half a screen-width always sweeps the cannon
+     across the whole field, whatever the device. A thumb planted anywhere in
+     the middle half of the screen can therefore reach either wall in one
+     stroke, and the feel is the same on a small phone and on a tablet. */
+  view.dragGain = clamp(195 * k / (0.46 * Math.max(1, w)), 1, 3);
+  if (Input && Input.rescale) Input.rescale();
 }
 
 function toVirtual(clientX, clientY){
@@ -1112,12 +1138,17 @@ function toVirtual(clientX, clientY){
 /* ---------- drawing primitives ---------- */
 function blit(spr,x,y){ ctx.drawImage(spr.cv, Math.round(x), Math.round(y)); }
 function text(str,x,y,color,align,sc){
-  var t = textCanvas(str,color);
   sc = sc || 1;
-  var w = t.w*sc, xx = x;
-  if (align === 'center') xx = x - w/2;
-  else if (align === 'right') xx = x - w;
-  ctx.drawImage(t.cv, Math.round(xx), Math.round(y), w, t.h*sc);
+  var chars = String(str).toUpperCase();
+  var xx = x;
+  if (align === 'center') xx = x - textWidth(chars,sc)/2;
+  else if (align === 'right') xx = x - textWidth(chars,sc);
+  xx = Math.round(xx); y = Math.round(y);
+  for (var i=0;i<chars.length;i++){
+    var ch = chars.charAt(i);
+    if (ch === ' ') continue;
+    ctx.drawImage(glyphCanvas(ch,color), xx + i*GLYPH_ADV*sc, y, GLYPH_W*sc, GLYPH_H*sc);
+  }
 }
 function pad(n,len){
   var s = String(Math.max(0,n|0));
@@ -1300,21 +1331,52 @@ function drawOver(){
 }
 
 /* ---------- input ---------- */
+var PLAYER_MIN_X = 8, PLAYER_MAX_X = VW - 8 - 13;
+/* virtual px of travel before a resting finger is treated as steering */
+var DRAG_DEADZONE = 1.5;
+
 var Input = {
   left:false, right:false, fire:false,
   dragActive:false, dragTargetX:0,
+  steerId:null,
   touch:false,
   pointers:{},
+  /* re-anchor every live pointer to the cannon's current position, so a finger
+     that is still down does not yank the ship when the ship is moved for it */
   reanchor:function(){
     for (var id in this.pointers){
       var p = this.pointers[id];
-      if (p.role === 'steer'){ p.startX = p.lastX; p.startShip = Game.player.x; }
+      p.startX = p.lastX; p.startShip = Game.player.x;
+    }
+    this.dragTargetX = Game.player.x;
+  },
+  /* the virtual<->css transform changed (rotation, resize, fullscreen): the
+     stored virtual anchors are stale, so recompute them from client coords */
+  rescale:function(){
+    for (var id in this.pointers){
+      var p = this.pointers[id];
+      if (p.clientX == null) continue;
+      var v = toVirtual(p.clientX, p.clientY);
+      p.startX = v.x; p.lastX = v.x; p.startShip = Game.player.x;
     }
     this.dragTargetX = Game.player.x;
   },
   clearDrag:function(){
     this.pointers = {};
     this.dragActive = false;
+    this.steerId = null;
+  },
+  /* hand steering to another finger that is already moving, if there is one */
+  passSteering:function(){
+    this.steerId = null; this.dragActive = false;
+    for (var id in this.pointers){
+      var p = this.pointers[id];
+      if (!p.moved) continue;
+      p.startX = p.lastX; p.startShip = Game.player.x;
+      this.steerId = id; this.dragActive = true;
+      this.dragTargetX = Game.player.x;
+      return;
+    }
   }
 };
 
@@ -1322,7 +1384,8 @@ function primaryAction(){
   Sound.unlock();
   if (Game.state === 'attract'){ newGame(); return true; }
   if (Game.state === 'over'){
-    if (Game.timer > 0) return true;
+    /* pressed during the read-your-score lockout: remember it and start when it lifts */
+    if (Game.timer > 0){ Game.pendingStart = true; return true; }
     newGame(); return true;
   }
   if (Game.state === 'paused'){ togglePause(); return true; }
@@ -1383,63 +1446,79 @@ function onDown(e){
   Input.touch = Input.touch || e.pointerType !== 'mouse';
   if (Input.touch) document.body.classList.add('touch');
   Sound.unlock();
-  if (primaryAction()){ e.preventDefault(); return; }
-  if (Game.state !== 'play' && Game.state !== 'ready' && Game.state !== 'dying') return;
+  /* a press that starts the game keeps steering it - do not swallow it */
+  primaryAction();
+  e.preventDefault();
+  if (Game.state === 'attract' || Game.state === 'over' || Game.state === 'paused') return;
   var v = toVirtual(e.clientX, e.clientY);
   Input.pointers[e.pointerId] = {
-    role:'steer', startX:v.x, lastX:v.x, startShip:Game.player.x,
+    startX:v.x, lastX:v.x, startShip:Game.player.x,
+    clientX:e.clientX, clientY:e.clientY,
     t:performance.now(), moved:false
   };
-  Input.dragActive = true;
-  Input.dragTargetX = Game.player.x;
   try{ stageEl.setPointerCapture(e.pointerId); }catch(err){}
-  e.preventDefault();
 }
 function onMove(e){
   var p = Input.pointers[e.pointerId];
   if (!p) return;
-  var v = toVirtual(e.clientX, e.clientY);
-  p.lastX = v.x;
-  var dx = v.x - p.startX;
-  if (Math.abs(dx) > 1.5) p.moved = true;
-  Input.dragTargetX = clamp(p.startShip + dx, 8, VW-8-13);
   e.preventDefault();
+  var v = toVirtual(e.clientX, e.clientY);
+  p.lastX = v.x; p.clientX = e.clientX; p.clientY = e.clientY;
+  var dx = (v.x - p.startX) * (view.dragGain || 1);
+  if (!p.moved){
+    if (Math.abs(dx) < DRAG_DEADZONE) return;   /* a resting finger never steers */
+    p.moved = true;
+    /* claim steering, keeping the anchor taken at touch-down so this very
+       first movement is applied rather than swallowed */
+    if (Input.steerId === null) Input.steerId = String(e.pointerId);
+  }
+  if (Input.steerId !== String(e.pointerId)) return;  /* another finger owns steering */
+  var target = p.startShip + dx;
+  /* re-anchor at the walls so reversing the stroke responds immediately */
+  if (target < PLAYER_MIN_X){ target = PLAYER_MIN_X; p.startShip = target; p.startX = v.x; }
+  else if (target > PLAYER_MAX_X){ target = PLAYER_MAX_X; p.startShip = target; p.startX = v.x; }
+  Input.dragActive = true;
+  Input.dragTargetX = target;
 }
-function onUp(e){
+function releasePointer(e, tapped){
   var p = Input.pointers[e.pointerId];
   if (!p) return;
   delete Input.pointers[e.pointerId];
-  var any = false;
-  for (var id in Input.pointers) if (Input.pointers[id].role === 'steer') any = true;
-  Input.dragActive = any;
-  if (!p.moved && (performance.now() - p.t) < 400) firePlayer();
+  if (Input.steerId === String(e.pointerId)) Input.passSteering();
+  if (tapped && !p.moved && (performance.now() - p.t) < 400) firePlayer();
   try{ stageEl.releasePointerCapture(e.pointerId); }catch(err){}
 }
+function onUp(e){ releasePointer(e, true); }
+/* a cancelled touch (system gesture, notification shade) is not a tap */
+function onCancel(e){ releasePointer(e, false); }
 stageEl.addEventListener('pointerdown', onDown, {passive:false});
 stageEl.addEventListener('pointermove', onMove, {passive:false});
 stageEl.addEventListener('pointerup', onUp);
-stageEl.addEventListener('pointercancel', onUp);
+stageEl.addEventListener('pointercancel', onCancel);
 
 /* on-screen buttons */
 function bindHold(el, on, off){
-  var active = false;
+  var held = {}, n = 0;
   var start = function(e){
     e.preventDefault(); e.stopPropagation();
     Sound.unlock();
-    if (primaryAction()) { return; }
-    if (active) return;
-    active = true; el.classList.add('on'); on();
+    /* a press that starts the game also stays held for it */
+    primaryAction();
+    if (held[e.pointerId]) return;
+    held[e.pointerId] = 1; n++;
+    if (n === 1){ el.classList.add('on'); on(); }
     try{ el.setPointerCapture(e.pointerId); }catch(err){}
   };
+  /* released on window: a pointer can end anywhere, and capture may not hold */
   var end = function(e){
-    if (!active) return;
-    active = false; el.classList.remove('on'); off();
-    if (e){ try{ el.releasePointerCapture(e.pointerId); }catch(err){} }
+    if (!held[e.pointerId]) return;
+    delete held[e.pointerId]; n--;
+    if (n <= 0){ n = 0; el.classList.remove('on'); off(); }
+    try{ el.releasePointerCapture(e.pointerId); }catch(err){}
   };
   el.addEventListener('pointerdown', start, {passive:false});
-  el.addEventListener('pointerup', end);
-  el.addEventListener('pointercancel', end);
-  el.addEventListener('pointerleave', end);
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
   el.addEventListener('contextmenu', function(e){ e.preventDefault(); });
 }
 bindHold(document.getElementById('btnLeft'),
