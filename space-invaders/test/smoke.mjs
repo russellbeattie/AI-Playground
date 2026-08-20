@@ -85,6 +85,8 @@ for (const p of profiles) {
   check(fleet.lives === 3, '3 lives');
 
   await page.waitForTimeout(1700);
+  // control/layout checks must not race a real death
+  await page.evaluate(() => { window.__SI.cheat.noBombs = true; window.__SI.cheat.invincible = true; window.__SI.game.bombs.length = 0; });
   st = await page.evaluate(() => window.__SI.game.state);
   check(st === 'play', 'enters play after the ready countdown');
   await page.screenshot({ path: `${SHOTS}/${name}-2-play.png` });
@@ -169,11 +171,13 @@ for (const p of profiles) {
     await page.keyboard.up('ArrowRight');
     const kx2 = await page.evaluate(() => window.__SI.game.player.x);
     check(kx2 > kx, 'ArrowRight moves the cannon');
-    await page.evaluate(() => { window.__SI.game.bullet = null; });
+    // count shots rather than look for a live bullet: at 330 px/s a shot can
+    // already have hit the bunker overhead before we get to look
+    const sc0 = await page.evaluate(() => { window.__SI.game.bullet = null; return window.__SI.game.shotCount; });
     await page.keyboard.press('Space');
-    await page.waitForTimeout(30);
-    const kshot = await page.evaluate(() => !!window.__SI.game.bullet);
-    check(kshot, 'Space fires');
+    await page.waitForTimeout(60);
+    const sc1 = await page.evaluate(() => window.__SI.game.shotCount);
+    check(sc1 > sc0, 'Space fires');
     await page.keyboard.press('KeyP');
     await page.waitForTimeout(60);
     check(await page.evaluate(() => window.__SI.game.state) === 'paused', 'P pauses');
